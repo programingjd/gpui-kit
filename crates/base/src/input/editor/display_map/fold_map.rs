@@ -214,6 +214,16 @@ impl FoldMap {
         }
     }
 
+    /// Fold or unfold every available candidate in one projection update.
+    pub(super) fn set_all_folded(&mut self, folded: bool) {
+        if folded {
+            self.folded.clone_from(&self.candidates);
+        } else {
+            self.folded.clear();
+        }
+        self.needs_rebuild = true;
+    }
+
     /// Toggle fold at the given start_line
     pub(super) fn toggle_fold(&mut self, start_line: usize) {
         let is_folded = self.is_folded_at(start_line);

@@ -11334,6 +11334,22 @@ impl InputBaseState<crate::input::EditorMode> {
         cx.notify();
     }
 
+    /// Collapse every scope currently provided by the highlighter.
+    pub fn collapse_all(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_folding() {
+            self.display_map.fold_all();
+            cx.notify();
+        }
+    }
+
+    /// Expand every collapsed scope.
+    pub fn expand_all(&mut self, cx: &mut Context<Self>) {
+        if self.mode.is_folding() {
+            self.display_map.clear_folds();
+            cx.notify();
+        }
+    }
+
     /// Unfold any folded ranges that hide the given position.
     ///
     /// Use this to reveal a position before acting on it (e.g. before
