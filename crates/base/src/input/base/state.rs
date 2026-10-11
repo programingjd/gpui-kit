@@ -124,11 +124,47 @@ actions!(
 );
 
 #[derive(Clone)]
+#[non_exhaustive]
 pub enum InputEvent {
     Change,
-    PressEnter { secondary: bool, shift: bool },
+    /// A text edit with exact replacement details and its origin.
+    DetailedChange(InputTextChange),
+    PressEnter {
+        secondary: bool,
+        shift: bool,
+    },
     Focus,
     Blur,
+}
+
+/// A text replacement made in the input buffer.
+#[derive(Clone, Debug)]
+pub struct InputTextEdit {
+    /// Byte range in the document immediately before this edit.
+    pub range: Range<usize>,
+    /// Text inserted in place of `range`.
+    pub replacement: SharedString,
+}
+
+/// Why an [`InputTextChange`] was made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputTextChangeOrigin {
+    /// A direct text edit, including IME input.
+    Edit,
+    /// Replaying an undo transaction.
+    Undo,
+    /// Replaying a redo transaction.
+    Redo,
+}
+
+/// Exact text edits for one input change.
+#[derive(Clone, Debug)]
+pub struct InputTextChange {
+    /// Edits in the order to apply them. Each range is expressed in the
+    /// document state at the time that edit is applied.
+    pub edits: Vec<InputTextEdit>,
+    /// Whether the edits came from direct input or history replay.
+    pub origin: InputTextChangeOrigin,
 }
 
 pub(super) const CONTEXT: &str = "Input";
@@ -3002,6 +3038,7 @@ impl<M: InputModeKind> InputBaseState<M> {
         let Some(replay) = replay else {
             return;
         };
+        let mut text_edits = Vec::with_capacity(replay.changes.len());
         let token_aware = self.inline_tokens.is_some()
             || replay
                 .changes
@@ -3014,11 +3051,15 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.replaying_history = token_aware;
         self.undo_manager.set_ignoring(true);
         for change in &replay.changes {
-            let (range, text) = if undo {
+            let (range, text): (Range<usize>, &String) = if undo {
                 (change.new_range.into(), &change.old_text)
             } else {
                 (change.old_range.into(), &change.new_text)
             };
+            text_edits.push(InputTextEdit {
+                range: range.clone(),
+                replacement: text.to_owned().into(),
+            });
             let range_utf16 = self.range_to_utf16(&range);
             self.replace_text_in_range_silent(Some(range_utf16), text, window, cx);
             self.replay_tokens(&range, text.len(), change.token_delta.as_deref(), undo);
@@ -3034,6 +3075,16 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.undo_manager.set_ignoring(false);
         self.replaying_history = false;
         self.emit_events = emit_events;
+        if emit_events && !text_edits.is_empty() {
+            cx.emit(InputEvent::DetailedChange(InputTextChange {
+                edits: text_edits,
+                origin: if undo {
+                    InputTextChangeOrigin::Undo
+                } else {
+                    InputTextChangeOrigin::Redo
+                },
+            }));
+        }
         if token_aware && emit_events {
             cx.emit(InputEvent::Change);
         }
@@ -4040,6 +4091,18 @@ impl<M: InputModeKind> InputBaseState<M> {
             self.mode.update_auto_grow(&self.display_map);
         }
         if self.emit_events {
+            if !self.silent_replace_text {
+                cx.emit(InputEvent::DetailedChange(InputTextChange {
+                    edits: sorted
+                        .iter()
+                        .map(|(range, replacement)| InputTextEdit {
+                            range: range.clone(),
+                            replacement: (*replacement).into(),
+                        })
+                        .collect(),
+                    origin: InputTextChangeOrigin::Edit,
+                }));
+            }
             cx.emit(InputEvent::Change);
         }
         cx.notify();
@@ -4367,6 +4430,20 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
             M::on_text_typed(self, &range, &new_text, window, cx);
         }
         if self.emit_events {
+            if !self.silent_replace_text {
+                let (edit_range, replacement) = if mask_changed {
+                    (0..old_text.len(), self.text.to_string())
+                } else {
+                    (range.clone(), new_text.to_owned())
+                };
+                cx.emit(InputEvent::DetailedChange(InputTextChange {
+                    edits: vec![InputTextEdit {
+                        range: edit_range,
+                        replacement: replacement.into(),
+                    }],
+                    origin: InputTextChangeOrigin::Edit,
+                }));
+            }
             cx.emit(InputEvent::Change);
         }
         cx.notify();
@@ -4499,6 +4576,15 @@ impl<M: InputModeKind> EntityInputHandler for InputBaseState<M> {
         }
         if new_text.is_empty() {
             self.undo_manager.commit_transaction();
+        }
+        if self.emit_events {
+            cx.emit(InputEvent::DetailedChange(InputTextChange {
+                edits: vec![InputTextEdit {
+                    range: range.clone(),
+                    replacement: new_text.to_owned().into(),
+                }],
+                origin: InputTextChangeOrigin::Edit,
+            }));
         }
         cx.notify();
     }
